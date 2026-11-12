@@ -7,11 +7,17 @@
   ④ 候选对精确 Jaccard + 列名结构相似（归一化编辑距离 >0.85 视为同列）
   ⑤ score = 0.7×jaccard + 0.3×结构相似 → top N 推荐 + 合并建议
 
+复核依据（basis）：每次落库的候选对同时固化一份依据快照（双方列签名、列数、
+行数与本轮相似度指标）并生成确定性 SHA-256 哈希。人工结论绑定当时依据哈希：
+依据未变的重复重算保持原结论且不新增记录；依据变化时旧结论归档、生成新待复核项。
+
 失败态：列数 < 2 的表不参与；dismissed（人工确认非重复）由 service 层过滤不再推荐，
 本模块只负责纯计算，不读不写数据库。
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from difflib import SequenceMatcher
 from typing import Any
@@ -68,6 +74,111 @@ TYPE_BUCKETS: dict[str, str] = {
 
 _MERSENNE_PRIME = (1 << 61) - 1
 MAX_HASH = (1 << 32) - 1
+
+# 依据口径版本：归一化规则 / 依据结构变化时递增，旧哈希整体视为依据变更。
+ENGINE_VERSION = 1
+
+
+# ------------------------------------------------------------- 复核依据 ----
+def build_pair_basis(
+    left_asset: dict[str, Any],
+    right_asset: dict[str, Any],
+    *,
+    jaccard: float,
+    structure_score: float,
+    score: float,
+    engine_version: int = ENGINE_VERSION,
+) -> dict[str, Any]:
+    """固化一对表在本轮计算中的复核依据（确定性结构，可直接哈希 / 前后对照）。"""
+    left_columns = sorted(
+        table_signature(left_asset.get("columns") or [])
+    )
+    right_columns = sorted(
+        table_signature(right_asset.get("columns") or [])
+    )
+    return {
+        "engine_version": engine_version,
+        "left": {
+            "asset_key": left_asset.get("asset_key"),
+            "row_count": int(left_asset.get("row_count") or 0),
+            "column_count": len(left_asset.get("columns") or []),
+            "column_signatures": left_columns,
+        },
+        "right": {
+            "asset_key": right_asset.get("asset_key"),
+            "row_count": int(right_asset.get("row_count") or 0),
+            "column_count": len(right_asset.get("columns") or []),
+            "column_signatures": right_columns,
+        },
+        "metrics": {
+            "jaccard": round(float(jaccard), 4),
+            "structure_score": round(float(structure_score), 4),
+            "score": round(float(score), 4),
+        },
+    }
+
+
+def basis_hash(basis: dict[str, Any]) -> str:
+    """依据的确定性 SHA-256（sort_keys 保证与字典插入顺序无关）。"""
+    payload = json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _basis_side_columns(basis: dict[str, Any], side: str) -> set[str]:
+    return set((basis.get(side) or {}).get("column_signatures") or [])
+
+
+def diff_basis(old_basis: dict[str, Any] | None, new_basis: dict[str, Any]) -> dict[str, Any]:
+    """前后两轮依据对照：列签名增删、行数变化、指标变化，供页面展示与审计说明。
+
+    old_basis 为空（历史数据回填场景）时整体标记为 changed。
+    """
+    if not old_basis:
+        return {
+            "changed": True,
+            "reason": "no_previous_basis",
+            "left_columns_added": [],
+            "left_columns_removed": [],
+            "right_columns_added": [],
+            "right_columns_removed": [],
+            "row_count_delta": {},
+            "metrics_delta": {},
+        }
+    old_left, new_left = _basis_side_columns(old_basis, "left"), _basis_side_columns(new_basis, "left")
+    old_right, new_right = _basis_side_columns(old_basis, "right"), _basis_side_columns(new_basis, "right")
+    row_delta: dict[str, int] = {}
+    for side in ("left", "right"):
+        old_rows = int((old_basis.get(side) or {}).get("row_count") or 0)
+        new_rows = int((new_basis.get(side) or {}).get("row_count") or 0)
+        if old_rows != new_rows:
+            row_delta[side] = new_rows - old_rows
+    metric_delta: dict[str, float] = {}
+    old_metrics = old_basis.get("metrics") or {}
+    new_metrics = new_basis.get("metrics") or {}
+    for key in ("jaccard", "structure_score", "score"):
+        old_value = round(float(old_metrics.get(key) or 0.0), 4)
+        new_value = round(float(new_metrics.get(key) or 0.0), 4)
+        if old_value != new_value:
+            metric_delta[key] = round(new_value - old_value, 4)
+    changed_sides = {
+        "left_columns_added": sorted(new_left - old_left),
+        "left_columns_removed": sorted(old_left - new_left),
+        "right_columns_added": sorted(new_right - old_right),
+        "right_columns_removed": sorted(old_right - new_right),
+    }
+    changed = (
+        any(changed_sides.values())
+        or bool(row_delta)
+        or bool(metric_delta)
+        or old_basis.get("engine_version") != new_basis.get("engine_version")
+    )
+    return {
+        "changed": changed,
+        "reason": "basis_changed" if changed else "unchanged",
+        **changed_sides,
+        "row_count_delta": row_delta,
+        "metrics_delta": metric_delta,
+    }
 
 
 # ------------------------------------------------------------ 签名归一化 ----
@@ -284,6 +395,13 @@ def rank_table_pairs(
         left_asset = eligible[left_key]
         right_asset = eligible[right_key]
         bucket_key = _pair_key(left_key, right_key)
+        basis = build_pair_basis(
+            left_asset,
+            right_asset,
+            jaccard=jaccard,
+            structure_score=structure,
+            score=score,
+        )
         buckets[bucket_key] = {
             "pair_key": bucket_key,
             "left_key": left_key,
@@ -298,6 +416,8 @@ def rank_table_pairs(
             "matched_columns": matched,
             "left_column_count": len(left_asset["columns"]),
             "right_column_count": len(right_asset["columns"]),
+            "basis": basis,
+            "basis_hash": basis_hash(basis),
             "suggestion": build_merge_suggestion(left_asset, right_asset, score, jaccard, structure),
         }
 

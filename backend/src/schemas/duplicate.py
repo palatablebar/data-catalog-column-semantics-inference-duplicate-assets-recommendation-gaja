@@ -11,3 +11,7 @@ class RecomputeRequest(BaseModel):
 
 class DismissRequest(BaseModel):
     note: str = Field(default="人工确认非重复", max_length=200)
+
+
+class ReopenRequest(BaseModel):
+    note: str = Field(default="人工推翻旧结论，重新复核", max_length=200)

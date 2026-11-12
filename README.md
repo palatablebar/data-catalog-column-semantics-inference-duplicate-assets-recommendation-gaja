@@ -22,7 +22,7 @@
 
 1. **资产检索** `/assets`：左侧数仓分层/业务域树，右侧表详情 + 列卡片（`ColumnChip` 标注推断类型与敏感标签）。
 2. **列语义推断校验** `/columns`：6 类正则 + 列名词典 + 基数/空值特征加权，展示证据（命中样本前 3）与置信度；支持人工纠正（记录 `manual` 来源）。
-3. **相似表推荐** `/duplicates`：MinHash k=128 + 16 带×8 行 LSH 候选 → 精确 Jaccard + 列名结构相似；并排列级 diff + 合并建议（下线表 / 保留列并集）。
+3. **相似表推荐** `/duplicates`：MinHash k=128 + 16 带×8 行 LSH 候选 → 精确 Jaccard + 列名结构相似；并排列级 diff + 合并建议（下线表 / 保留列并集）。**复核结论与当时依据（basis）绑定**：每轮落库固化依据快照与确定性哈希（双方列签名、列数、行数、相似度指标），同依据重复重算保持已排除且不新增记录；表结构/数据特征变化导致哈希变化时，旧结论轮次 `superseded` 归档（保留原因与依据），同时生成 `pending_review` 新待复核项，页面台账可对照前后依据；重算单事务提交，失败整体回滚，已有结论与待办不丢。
 4. **标签与敏感列** `/tags`：manual/inferred 双来源标签；viewer 可批量补打 `sensitive:high`。
 5. **采集任务** `/ingest`：Celery worker 读取 `sample` schema 的 5 张样例表（各 300 行），逐列统计落库；任务状态可轮询。
 6. **导出目录 CSV**：`GET /api/assets/export.csv`，含资产 / 列 / 推断类型 / 标签。
@@ -47,7 +47,8 @@
 - 16 带 × 8 行 LSH → 候选对；候选对计算精确 Jaccard + 列名结构相似（归一化编辑距离 > 0.85 视为同列，取 matched / min(lenA,lenB)）。
 - **score = 0.7×jaccard + 0.3×结构相似** → top N（默认 6）落库。
 - 合并建议：下线列少/行少的一方，保留列并集、`extra_in_drop`、`missing_in_drop`、动作清单。
-- 失败态：列 < 2 的表不参与；人工 `dismissed` 的对不再出现在推荐列表。
+- 失败态：列 < 2 的表不参与；人工 `dismissed` 的对在依据未变前不再出现在推荐列表，依据变化后旧轮次归档并生成 `pending_review` 待办。
+- **复核依据绑定（pair_review 多轮台账）**：每个对维护按代（generation）递增的复核轮次，人工 dismiss/merged 结论写入当时轮次并绑定 `basis_hash`；`recompute` 比对哈希决定「维持结论 / 归档+新待办」，`POST /duplicates/{id}/reopen` 可人工推翻旧结论重新复核；全部动作落 `audit_log`。
 
 ## 快速启动
 
@@ -107,12 +108,13 @@ gb-556/
 │       ├── config/{settings,database,celery_app,app}.py
 │       ├── constants/{enums,roles,error_codes,limits,tasks}.py
 │       ├── middlewares/{auth,rbac,rate_limit,audit_logger,error_handler}.py
-│       ├── models/{user,asset,asset_column,semantic_tag,similarity_pair,ingest_job,audit_log}.py
+│       ├── models/{user,asset,asset_column,semantic_tag,similarity_pair,pair_review,ingest_job,audit_log}.py
 │       ├── schemas/  controllers/  routes/
 │       ├── services/{typing_engine,similarity_engine,catalog_fixtures,...}.py
 │       ├── utils/{jwt,password,errors,pagination,formatters,redis_client}.py
-│       └── migrations/versions/0001_initial.py
+│       └── migrations/versions/0001_initial.py, 0002_pair_review_basis.py
 ├── worker/                     # Celery worker（采样 + 列统计 + 心跳）
+├── backend/tests/              # pytest：依据哈希/前后对照 + 复核全生命周期（SQLite 内存库）
 └── frontend/src/{api,stores,types,components/common,components/catalog,hooks,pages,router,utils,constants,styles}
 ```
 
@@ -138,7 +140,7 @@ gb-556/
 - **组 2 `Role`（admin/analyst/viewer）**
   - 后端：`backend/src/constants/roles.py`、`constants/enums.py`、`middlewares/rbac.py`、`scripts/seed_demo.py`
   - 前端：`frontend/src/constants/enums.ts`、`types/models.ts`、`utils/permission.ts`、`components/common/RoleBadge.vue`、`pages/LoginPage.vue`
-- 其它枚举：`AssetLayer`（ods/dwd/dws/ads）、`IngestJobStatus`（queued/running/completed/failed）、`PairStatus`（recommended/dismissed/merged）、`TagSource`（manual/inferred）、`TagCategory`（pii/business/governance）、`InferenceSource`（auto/manual）——后端 `constants/enums.py` 与前端 `constants/enums.ts` 各一份。
+- 其它枚举：`AssetLayer`（ods/dwd/dws/ads）、`IngestJobStatus`（queued/running/completed/failed）、`PairStatus`（recommended/pending_review/dismissed/merged）、`PairReviewState`（pending/dismissed/merged/superseded）、`TagSource`（manual/inferred）、`TagCategory`（pii/business/governance）、`InferenceSource`（auto/manual）——后端 `constants/enums.py` 与前端 `constants/enums.ts` 各一份。
 
 ## Docker 说明
 

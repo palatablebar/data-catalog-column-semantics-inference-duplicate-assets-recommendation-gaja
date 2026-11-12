@@ -64,6 +64,18 @@ class PairStatus(StrEnum):
     RECOMMENDED = "recommended"
     DISMISSED = "dismissed"
     MERGED = "merged"
+    # 新依据触发的待复核：保留旧结论的同时生成新一轮待办
+    PENDING_REVIEW = "pending_review"
+
+
+class PairReviewState(StrEnum):
+    """复核轮次状态：pending 待复核 / dismissed 人工判非重复 / merged 确认合并 /
+    superseded 依据变化后被新轮次取代（旧结论归档保留）。"""
+
+    PENDING = "pending"
+    DISMISSED = "dismissed"
+    MERGED = "merged"
+    SUPERSEDED = "superseded"
 
 
 class TagSource(StrEnum):

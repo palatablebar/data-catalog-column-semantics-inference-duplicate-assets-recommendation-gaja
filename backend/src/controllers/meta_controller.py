@@ -37,7 +37,9 @@ def overview(db: Session) -> dict:
         return db.scalar(select(func.count()).select_from(model)) or 0
 
     pending_pairs = db.scalar(
-        select(func.count()).select_from(SimilarityPair).where(SimilarityPair.status == "recommended")
+        select(func.count())
+        .select_from(SimilarityPair)
+        .where(SimilarityPair.status.in_(("recommended", "pending_review")))
     ) or 0
     completed = db.scalar(
         select(func.count()).select_from(IngestJob).where(IngestJob.status == "completed")

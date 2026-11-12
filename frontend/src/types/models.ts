@@ -107,6 +107,53 @@ export interface MergeSuggestion {
   actions: string[]
   merged_columns?: { left: string; right: string; ratio: number }[]
   generated_by?: string
+  dismiss_note?: string
+  dismissed_by?: string
+}
+
+export type PairReviewState = 'pending' | 'dismissed' | 'merged' | 'superseded'
+
+export interface PairBasisSide {
+  asset_key: string
+  row_count: number
+  column_count: number
+  column_signatures: string[]
+}
+
+export interface PairBasis {
+  engine_version: number
+  left: PairBasisSide
+  right: PairBasisSide
+  metrics: {
+    jaccard: number
+    structure_score: number
+    score: number
+  }
+}
+
+export interface BasisChange {
+  changed: boolean
+  reason: string
+  left_columns_added: string[]
+  left_columns_removed: string[]
+  right_columns_added: string[]
+  right_columns_removed: string[]
+  row_count_delta: Record<string, number>
+  metrics_delta: Record<string, number>
+}
+
+export interface PairReview {
+  id: string
+  generation: number
+  state: PairReviewState
+  basis_hash: string | null
+  basis: PairBasis | null
+  basis_change: BasisChange | null
+  review_note: string | null
+  reviewed_by: string | null
+  reviewed_at: string | null
+  created_at: string | null
+  updated_at: string | null
 }
 
 export interface SimilarityPair {
@@ -118,6 +165,10 @@ export interface SimilarityPair {
   status: string
   verdict: string
   computed_at: string | null
+  basis_hash: string | null
+  basis?: PairBasis | null
+  active_review?: PairReview | null
+  reviews?: PairReview[]
   left: PairAsset
   right: PairAsset
   suggestion: MergeSuggestion | Record<string, never>

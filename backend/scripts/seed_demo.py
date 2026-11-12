@@ -24,9 +24,11 @@ from src.constants.roles import Role
 from src.models.asset import Asset
 from src.models.asset_column import AssetColumn
 from src.models.ingest_job import IngestJob
+from src.models.pair_review import PairReview
 from src.models.semantic_tag import SemanticTag
 from src.models.similarity_pair import SimilarityPair
 from src.models.user import User
+from src.constants.enums import PairReviewState
 from src.services import catalog_fixtures, similarity_engine
 from src.utils.logger import get_logger
 from src.utils.password import hash_password
@@ -255,16 +257,28 @@ def seed_similarity_pairs(db) -> None:
             method=candidate["method"],
             status="recommended",
             suggestion=candidate["suggestion"],
+            basis=candidate["basis"],
+            basis_hash=candidate["basis_hash"],
         )
         db.add(pair)
         db.flush()
+        review = PairReview(
+            pair_id=pair.id,
+            generation=1,
+            state=PairReviewState.PENDING.value,
+            basis=candidate["basis"],
+            basis_hash=candidate["basis_hash"],
+        )
+        db.add(review)
+        db.flush()
+        pair.active_review_id = review.id
         created_pairs.append(pair)
         _created(
             "SimilarityPair",
             f"{candidate['left_table']}~{candidate['right_table']} score={candidate['score']}",
         )
 
-    # 演一个"人工确认非重复"：最低分那一对置 dismissed，后续不再推荐
+    # 演一个"人工确认非重复"：最低分那一对置 dismissed，结论与第 1 代依据绑定
     if created_pairs:
         lowest = min(created_pairs, key=lambda pair: (pair.score, str(pair.id)))
         lowest.status = "dismissed"
@@ -272,6 +286,11 @@ def seed_similarity_pairs(db) -> None:
         suggestion["dismiss_note"] = "人工复核：两表口径不同（一张为明细、一张为汇总），非重复"
         suggestion["dismissed_by"] = "admin@catmap.demo"
         lowest.suggestion = suggestion
+        review = db.get(PairReview, lowest.active_review_id)
+        review.state = PairReviewState.DISMISSED.value
+        review.review_note = suggestion["dismiss_note"]
+        review.reviewed_by = "admin@catmap.demo"
+        review.reviewed_at = datetime.now(timezone.utc)
         _skipped("SimilarityPair", f"dismissed score={round(lowest.score, 3)}")
 
 

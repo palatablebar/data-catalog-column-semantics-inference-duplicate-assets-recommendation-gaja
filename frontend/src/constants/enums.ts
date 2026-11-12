@@ -70,6 +70,21 @@ export const PAIR_STATUS_LABELS: Record<string, string> = {
   recommended: '待确认',
   dismissed: '已排除',
   merged: '已合并',
+  pending_review: '依据变化 · 待复核',
+}
+
+export const PAIR_REVIEW_STATE_LABELS: Record<string, string> = {
+  pending: '待复核',
+  dismissed: '人工判非重复',
+  merged: '确认合并',
+  superseded: '已被新依据取代',
+}
+
+export const PAIR_REVIEW_STATE_TONE: Record<string, string> = {
+  pending: 'is-pending',
+  dismissed: 'is-dismissed',
+  merged: 'is-merged',
+  superseded: 'is-superseded',
 }
 
 export const VERDICT_LABELS: Record<string, string> = {

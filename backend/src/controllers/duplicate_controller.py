@@ -25,3 +25,7 @@ def merge_suggestion(db: Session, pair_id: str, user: User) -> dict:
 
 def dismiss(db: Session, pair_id: str, note: str, user: User) -> dict:
     return duplicate_service.dismiss(db, pair_id, note, user)
+
+
+def reopen(db: Session, pair_id: str, note: str, user: User) -> dict:
+    return duplicate_service.reopen(db, pair_id, note, user)

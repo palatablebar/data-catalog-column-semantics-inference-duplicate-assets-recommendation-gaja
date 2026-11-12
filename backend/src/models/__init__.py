@@ -6,6 +6,7 @@ from src.models.asset import Asset
 from src.models.asset_column import AssetColumn
 from src.models.semantic_tag import SemanticTag
 from src.models.similarity_pair import SimilarityPair
+from src.models.pair_review import PairReview
 from src.models.ingest_job import IngestJob
 
 __all__ = [
@@ -16,5 +17,6 @@ __all__ = [
     "AssetColumn",
     "SemanticTag",
     "SimilarityPair",
+    "PairReview",
     "IngestJob",
 ]

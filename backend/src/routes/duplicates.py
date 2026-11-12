@@ -6,7 +6,7 @@ from src.controllers import duplicate_controller
 from src.middlewares.rate_limit import rate_limit
 from src.middlewares.rbac import require_permission
 from src.models.user import User
-from src.schemas.duplicate import DismissRequest, RecomputeRequest
+from src.schemas.duplicate import DismissRequest, RecomputeRequest, ReopenRequest
 
 router = APIRouter(prefix="/duplicates", tags=["duplicates"])
 
@@ -58,3 +58,14 @@ def dismiss(
     _: User = rate_limit("dismiss"),
 ) -> dict:
     return duplicate_controller.dismiss(db, pair_id, payload.note, user)
+
+
+@router.post("/{pair_id}/reopen")
+def reopen(
+    pair_id: str,
+    payload: ReopenRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("duplicate:dismiss")),
+    _: User = rate_limit("dismiss"),
+) -> dict:
+    return duplicate_controller.reopen(db, pair_id, payload.note, user)

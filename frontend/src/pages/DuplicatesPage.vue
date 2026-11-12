@@ -3,7 +3,7 @@
     <PageHeader
       title="相似表推荐"
       eyebrow="03 / DUPLICATE PLATE"
-      subtitle="列签名归一化 → MinHash k=128 + 16×8 LSH 候选 → 精确 Jaccard + 列名结构相似；score = 0.7×jaccard + 0.3×结构相似。"
+      subtitle="列签名归一化 → MinHash k=128 + 16×8 LSH 候选 → 精确 Jaccard + 列名结构相似；score = 0.7×jaccard + 0.3×结构相似。复核结论与当时依据绑定。"
     >
       <template #actions>
         <button
@@ -21,6 +21,10 @@
     </PageHeader>
 
     <ErrorNotice v-if="error" :message="error" />
+    <div v-if="recomputeNotice" class="dups__notice ink-panel" data-testid="recompute-notice">
+      <p class="mono dups__notice-line">{{ recomputeNotice }}</p>
+      <button class="dups__notice-close" type="button" @click="recomputeNotice = ''">×</button>
+    </div>
 
     <section class="dups__stats">
       <div class="stat ink-panel">
@@ -30,6 +34,10 @@
       <div class="stat ink-panel">
         <p class="smallcaps">待确认 RECOMMENDED</p>
         <p class="stat__value numeric">{{ pairs.recommended_total ?? 0 }}</p>
+      </div>
+      <div class="stat ink-panel" :class="{ 'stat--alert': (pairs.pending_review_total ?? 0) > 0 }">
+        <p class="smallcaps">依据变化待复核</p>
+        <p class="stat__value numeric stat__value--hot">{{ pairs.pending_review_total ?? 0 }}</p>
       </div>
       <div class="stat ink-panel">
         <p class="smallcaps">真重复 ≥0.85</p>
@@ -47,7 +55,7 @@
     <div class="dups__grid">
       <section class="pairlist ink-panel">
         <header class="pairlist__head">
-          <span class="smallcaps">TOP {{ pairs.items?.length ?? 0 }} 推荐</span>
+          <span class="smallcaps">TOP {{ pairs.items?.length ?? 0 }} 待办</span>
           <span class="mono">按 score 倒序</span>
         </header>
         <ul class="pairlist__rows">
@@ -55,13 +63,20 @@
             v-for="pair in pairs.items"
             :key="pair.id"
             class="pair-row"
-            :class="{ 'is-selected': selectedId === pair.id }"
+            :class="{ 'is-selected': selectedId === pair.id, 'is-pending-review': pair.status === 'pending_review' }"
             @click="selectPair(pair.id)"
           >
             <div class="pair-row__top">
               <span class="pair-row__rank mono">#{{ rankOf(pair.id) }}</span>
               <span class="pair-row__verdict" :class="{ 'is-hot': pair.score >= 0.85 }">
                 {{ verdictLabel(pair.verdict) }}
+              </span>
+              <span
+                v-if="pair.status === 'pending_review'"
+                class="pair-row__flag"
+                title="表结构/数据特征已变化，旧结论归档，请对照前后依据重新复核"
+              >
+                依据变化
               </span>
               <span class="pair-row__status mono">{{ statusLabel(pair.status) }}</span>
             </div>
@@ -73,6 +88,12 @@
               jaccard {{ pair.jaccard.toFixed(3) }} · 结构 {{ pair.structure_score.toFixed(3) }} ·
               {{ pair.left.column_count }} vs {{ pair.right.column_count }} 列
             </p>
+            <p class="pair-row__basis mono" :title="pair.basis_hash ?? ''">
+              依据 {{ shortBasis(pair.basis_hash) }}
+            </p>
+          </li>
+          <li v-if="!pairs.items?.length" class="pairlist__empty mono">
+            暂无待复核项（已排除对在依据变化前不会重复出现）。
           </li>
         </ul>
       </section>
@@ -98,8 +119,22 @@
               <p class="smallcaps">综合相似度 SCORE</p>
               <p class="pair-detail__score numeric">{{ detail.score.toFixed(3) }}</p>
               <SimilarityBar :score="detail.score" />
+              <p class="pair-detail__basis mono" :title="detail.basis_hash ?? ''">
+                当前依据 {{ shortBasis(detail.basis_hash) }}
+              </p>
             </div>
           </header>
+
+          <div
+            v-if="detail.status === 'pending_review'"
+            class="dups__alert ink-panel"
+            data-testid="basis-changed-alert"
+          >
+            <p class="smallcaps dups__alert-title">依据已变化 · 旧结论已归档</p>
+            <p class="dups__alert-body">
+              表结构或数据特征与上次人工结论时不同，请对照下方台账中的前后依据后重新复核。
+            </p>
+          </div>
 
           <div class="pair-detail__body">
             <DiffColumnsTable
@@ -134,24 +169,39 @@
                   id="gen-merge"
                   class="btn btn--primary"
                   type="button"
-                  :disabled="!perm.can('duplicate:merge') || merging"
+                  :disabled="!perm.can('duplicate:merge') || merging || !isPending"
                   @click="generateMerge"
                 >
                   {{ merging ? '生成中…' : '生成合并建议' }}
                 </button>
                 <button
+                  v-if="isPending"
                   class="btn btn--ghost"
                   type="button"
                   :disabled="!perm.can('duplicate:dismiss')"
                   @click="dismissCurrent"
                 >
-                  标记非重复
+                  标记非重复（结论绑定当前依据）
+                </button>
+                <button
+                  v-else
+                  class="btn btn--ghost"
+                  type="button"
+                  :disabled="!perm.can('duplicate:dismiss')"
+                  @click="reopenCurrent"
+                >
+                  重新打开复核
                 </button>
               </div>
               <p v-if="!perm.can('duplicate:merge')" class="smallcaps merge__readonly">
                 当前角色无 duplicate:merge 权限
               </p>
             </aside>
+
+            <ReviewLedger
+              :reviews="detail.reviews ?? []"
+              :active-review-id="detail.active_review?.id"
+            />
           </div>
         </template>
       </section>
@@ -166,12 +216,15 @@ import ErrorNotice from '../components/common/ErrorNotice.vue'
 import PermissionHint from '../components/common/PermissionHint.vue'
 import SimilarityBar from '../components/common/SimilarityBar.vue'
 import DiffColumnsTable from '../components/catalog/DiffColumnsTable.vue'
+import ReviewLedger from '../components/catalog/ReviewLedger.vue'
 import {
   dismissPair,
   fetchPair,
   fetchPairs,
   generateMergeSuggestion,
   recomputePairs,
+  reopenPair,
+  type PairListResponse,
 } from '../api/duplicates'
 import { usePermission } from '../hooks/usePermission'
 import type { MergeSuggestion, SimilarityPair } from '../types/models'
@@ -179,16 +232,18 @@ import { PAIR_STATUS_LABELS, VERDICT_LABELS } from '../constants/enums'
 import { numberText } from '../utils/format'
 
 const perm = usePermission()
-const pairs = ref<{
-  items: SimilarityPair[]
-  total: number
-  recommended_total?: number
-  dismissed_total?: number
-  true_duplicate_total?: number
-}>({ items: [], total: 0 })
+const pairs = ref<PairListResponse>({
+  items: [],
+  total: 0,
+  recommended_total: 0,
+  dismissed_total: 0,
+  pending_review_total: 0,
+  true_duplicate_total: 0,
+})
 const detail = ref<SimilarityPair | null>(null)
 const selectedId = ref('')
 const error = ref('')
+const recomputeNotice = ref('')
 const recomputing = ref(false)
 const merging = ref(false)
 
@@ -202,6 +257,8 @@ const mergeSuggestion = computed<MergeSuggestion | null>(() => {
   return suggestion && suggestion.drop_asset_key ? suggestion : null
 })
 
+const isPending = computed(() => detail.value?.status === 'recommended' || detail.value?.status === 'pending_review')
+
 function formatNumber(value: number | undefined) {
   return numberText(value)
 }
@@ -214,10 +271,15 @@ function statusLabel(status: string) {
 function rankOf(pairId: string) {
   return (pairs.value.items.findIndex((item) => item.id === pairId) ?? 0) + 1
 }
+function shortBasis(hash: string | null | undefined) {
+  return hash ? `${hash.slice(0, 10)}…` : '待重算补全'
+}
 
 async function loadPairs() {
   try {
-    pairs.value = await fetchPairs(5)
+    pairs.value = await fetchPairs(50)
+    const stillPresent = pairs.value.items.some((item) => item.id === selectedId.value)
+    if (!stillPresent) selectedId.value = ''
     if (!selectedId.value && pairs.value.items.length) {
       await selectPair(pairs.value.items[0].id)
     }
@@ -239,11 +301,15 @@ async function runRecompute() {
   recomputing.value = true
   error.value = ''
   try {
-    await recomputePairs(6)
+    const result = await recomputePairs(6)
+    recomputeNotice.value =
+      `重算完成：新增 ${result.created} 对、刷新 ${result.updated} 对；` +
+      `依据变化生成新待复核 ${result.reopened_pairs} 项（归档旧结论 ${result.superseded_pairs}），` +
+      `依据未变维持已排除 ${result.unchanged_decisions} 项。`
     await loadPairs()
     if (selectedId.value) await selectPair(selectedId.value)
   } catch (err) {
-    error.value = (err as { message?: string }).message ?? '重算失败'
+    error.value = (err as { message?: string }).message ?? '重算失败，已有结论与待办未受影响'
   } finally {
     recomputing.value = false
   }
@@ -273,20 +339,70 @@ async function dismissCurrent() {
   }
 }
 
+async function reopenCurrent() {
+  if (!detail.value) return
+  try {
+    await reopenPair(detail.value.id, '人工推翻旧结论，重新复核')
+    await loadPairs()
+    await selectPair(detail.value.id)
+  } catch (err) {
+    error.value = (err as { message?: string }).message ?? '操作失败'
+  }
+}
+
 onMounted(loadPairs)
 </script>
 
 <style scoped>
+.dups__notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  border-left: 3px solid var(--moss);
+}
+.dups__notice-line {
+  font-size: 10.5px;
+  color: var(--ink-soft);
+  margin: 0;
+}
+.dups__notice-close {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.dups__alert {
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-left: 3px solid var(--brick);
+}
+.dups__alert-title {
+  color: var(--brick);
+  margin-bottom: 4px;
+}
+.dups__alert-body {
+  font-size: 11px;
+  color: var(--ink-soft);
+  margin: 0;
+}
 .dups__stats {
   display: flex;
   align-items: stretch;
   gap: 8px;
   margin-bottom: 14px;
+  flex-wrap: wrap;
 }
 .stat {
   padding: 8px 14px;
   min-width: 110px;
   color: var(--ink-faint);
+}
+.stat--alert {
+  outline: 1px solid var(--brick-soft);
 }
 .stat__value {
   font-family: var(--font-display);
@@ -328,6 +444,11 @@ onMounted(loadPairs)
   margin: 0;
   padding: 0;
 }
+.pairlist__empty {
+  padding: 16px 12px;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
 .pair-row {
   padding: 9px 12px;
   border-bottom: 1px dashed var(--line-soft);
@@ -340,6 +461,9 @@ onMounted(loadPairs)
 .pair-row.is-selected {
   background: color-mix(in oklch, var(--moss-wash) 70%, transparent);
   box-shadow: inset 2px 0 0 var(--moss);
+}
+.pair-row.is-pending-review {
+  box-shadow: inset 2px 0 0 var(--brick);
 }
 .pair-row__top {
   display: flex;
@@ -362,6 +486,13 @@ onMounted(loadPairs)
   color: var(--brick);
   border-color: var(--brick-soft);
 }
+.pair-row__flag {
+  font-size: 9px;
+  color: var(--brick);
+  border: 1px solid var(--brick-soft);
+  padding: 1px 5px;
+  letter-spacing: 0.05em;
+}
 .pair-row__status {
   margin-left: auto;
   font-size: 9px;
@@ -380,6 +511,13 @@ onMounted(loadPairs)
   margin-top: 5px;
   font-size: 9.5px;
   color: var(--ink-faint);
+}
+.pair-row__basis,
+.pair-detail__basis {
+  margin-top: 4px;
+  font-size: 9px;
+  color: var(--ink-faint);
+  word-break: break-all;
 }
 .pair-detail {
   min-width: 0;
